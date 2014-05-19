@@ -1,0 +1,105 @@
+#!/usr/bin/perl -w
+# $Id: module:tools,v 1.1 2005/08/16 13:17:40 ajr Exp $
+#
+# Script:	module:tools
+#
+# Description:	Cfengine module to automate software update.
+#		Based on work by Luke Kanies:
+#		http://madstop.com/index.pl?lastnode_id=44&node_id=632
+#
+# Author:	Ade Rixon <info@NOTTHISBIT.big-bubbles.fluff.org>
+#
+
+my $DEBUG=0;
+
+# Cfengine rule files dir
+my $cfinputs = $ENV{'CFINPUTS'} || '/var/cfengine/inputs';
+my $cffile = $DEBUG ? 'cf.test' : "$cfinputs/cf.pkginstall";	# output file
+
+my $output = '';
+my $installables = '';
+# %pkgs is a hash of hashes:
+# $pkgs{'pkgname'}->{'version'}
+my (%pkgs, $pkgname, $version, $pkgdefn);
+
+my $toollist = join(':', @ARGV);
+foreach my $tool ( split(/:+/, $toollist) ) {
+
+	# loosely deconstruct pkgname-version by finding last hyphen after
+	# alphanumerics
+	# (NB. this isn't robust and will fail on certain odd strings)
+	($pkgname, $version) = ($tool =~ m/([\w\-]+)-(.+)/);
+	if ((!$pkgname) or (!$version)) {
+		warn("$0: couldn't parse $tool, skipping\n");
+		next;
+	}
+
+	# keep track of packages, spot duplicates
+	if (exists($pkgs{$pkgname})) {
+		if (defined($pkgs{$pkgname}->{$version})) {
+			warn("$0: ignoring another instance of $pkgname-$version\n");
+			$pkgs{$pkgname}->{$version}++;
+			next;
+		} else {
+			warn("$0: multiple versions of $pkgname specified, may conflict: ", join(keys %{$pkgs{$pkgname}}));
+		}
+	}
+	$pkgs{$pkgname}->{$version} = 1;
+
+	$pkgdefn = $tool;
+	$pkgdefn =~ s/\W//g;	# strip non-alpha chars to make unique string
+	$installables .= $pkgdefn . ' ';
+
+	# construct rules to install/update this tool
+	$output .= qq(
+files:
+
+	Check::
+		\$(depot)/$tool/.	inform=on
+
+copy:
+
+	Update::
+		\$(depot)/$tool	dest=\$(depot)/$tool
+					server=\$(mainserver)
+					r=10
+					purge=false
+					backup=false
+					type=mtime
+					timestamps=keep
+					ignore=*~
+					define=$pkgdefn
+					inform=on
+
+shellcommands:
+
+	$pkgdefn\::
+		#"/tools/bin/graft -d -D $tool"
+		"/tools/bin/graft -p -D $tool"
+		"/tools/bin/graft -i $tool"
+);
+
+	# check for optional per-tool rule file
+	if ( -f "$cfinputs/tools/cf.$pkgname" ) {
+		$output .= qq(
+import:
+	$pkgdefn\::
+		tools/cf.$pkgname
+);
+	}
+}
+
+# output all rules
+if ($output) {
+	open(CFFILE, ">$cffile") or die("$0: couldn't open $cffile: $!\n");
+	# insert header
+	print CFFILE qq(
+control:
+	AddInstallable = ( $installables )
+        actionsequence = ( files copy shellcommands )
+);
+	print CFFILE $output;
+	close(CFFILE);
+} else {
+	die("$0: no packages to configure, $cffile unchanged\n");
+}
